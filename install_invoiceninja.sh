@@ -19,36 +19,38 @@ apk update
 apk upgrade
 apk add --no-cache \
     nginx \
-    php82 \
-    php82-fpm \
-    php82-opcache \
-    php82-mysqli \
-    php82-pdo \
-    php82-pdo_mysql \
-    php82-mbstring \
-    php82-xml \
-    php82-simplexml \
-    php82-zip \
-    php82-gd \
-    php82-curl \
-    php82-tokenizer \
-    php82-bcmath \
-    php82-soap \
-    php82-gmp \
-    php82-intl \
-    php82-fileinfo \
-    php82-dom \
-    php82-session \
-    php82-ctype \
-    php82-json \
-    php82-openssl \
+    php83 \
+    php83-fpm \
+    php83-opcache \
+    php83-mysqli \
+    php83-pdo \
+    php83-pdo_mysql \
+    php83-mbstring \
+    php83-xml \
+    php83-simplexml \
+    php83-zip \
+    php83-gd \
+    php83-curl \
+    php83-tokenizer \
+    php83-bcmath \
+    php83-soap \
+    php83-gmp \
+    php83-intl \
+    php83-fileinfo \
+    php83-dom \
+    php83-session \
+    php83-ctype \
+    php83-iconv \
+    php83-phar \
+    php83-openssl \
     mariadb \
     mariadb-client \
     composer \
     git \
     curl \
     openssl \
-    supervisor
+    dcron \
+    libcap
 
 echo "Step 2: Starting and configuring MariaDB..."
 rc-update add mariadb default
@@ -56,18 +58,23 @@ rc-update add mariadb default
 /etc/init.d/mariadb start
 
 # Wait for MariaDB to be ready
-sleep 5
+sleep 10
 
 # Secure MariaDB installation
-mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('${MYSQL_ROOT_PASSWORD}');"
-mysql -e "DELETE FROM mysql.user WHERE User='';"
-mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
-mysql -e "DROP DATABASE IF EXISTS test;"
-mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-mysql -e "FLUSH PRIVILEGES;"
+mariadb -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';" 2>/dev/null || \
+mysql_secure_installation <<EOSQL
+${MYSQL_ROOT_PASSWORD}
+${MYSQL_ROOT_PASSWORD}
+y
+y
+y
+y
+EOSQL
+
+sleep 2
 
 echo "Step 3: Creating database and user..."
-mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<EOF
+mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" <<EOF
 CREATE DATABASE IF NOT EXISTS ${DB_DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USERNAME}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
 GRANT ALL PRIVILEGES ON ${DB_DATABASE}.* TO '${DB_USERNAME}'@'localhost';
@@ -75,34 +82,38 @@ FLUSH PRIVILEGES;
 EOF
 
 echo "Step 4: Configuring PHP-FPM..."
-sed -i 's/memory_limit = .*/memory_limit = 512M/' /etc/php82/php.ini
-sed -i 's/upload_max_filesize = .*/upload_max_filesize = 100M/' /etc/php82/php.ini
-sed -i 's/post_max_size = .*/post_max_size = 100M/' /etc/php82/php.ini
-sed -i 's/max_execution_time = .*/max_execution_time = 300/' /etc/php82/php.ini
-sed -i 's/;date.timezone =.*/date.timezone = UTC/' /etc/php82/php.ini
+sed -i 's/memory_limit = .*/memory_limit = 512M/' /etc/php83/php.ini
+sed -i 's/upload_max_filesize = .*/upload_max_filesize = 100M/' /etc/php83/php.ini
+sed -i 's/post_max_size = .*/post_max_size = 100M/' /etc/php83/php.ini
+sed -i 's/max_execution_time = .*/max_execution_time = 300/' /etc/php83/php.ini
+sed -i 's/;date.timezone =.*/date.timezone = UTC/' /etc/php83/php.ini
 
 # Configure PHP-FPM pool
-sed -i 's/user = nobody/user = nginx/' /etc/php82/php-fpm.d/www.conf
-sed -i 's/group = nobody/group = nginx/' /etc/php82/php-fpm.d/www.conf
-sed -i 's/listen = 127.0.0.1:9000/listen = \/run\/php-fpm82.sock/' /etc/php82/php-fpm.d/www.conf
-sed -i 's/;listen.owner = nobody/listen.owner = nginx/' /etc/php82/php-fpm.d/www.conf
-sed -i 's/;listen.group = nobody/listen.group = nginx/' /etc/php82/php-fpm.d/www.conf
-sed -i 's/;listen.mode = 0660/listen.mode = 0660/' /etc/php82/php-fpm.d/www.conf
+sed -i 's/user = nobody/user = nginx/' /etc/php83/php-fpm.d/www.conf
+sed -i 's/group = nobody/group = nginx/' /etc/php83/php-fpm.d/www.conf
+sed -i 's/listen = 127.0.0.1:9000/listen = \/run\/php-fpm83\/php-fpm83.sock/' /etc/php83/php-fpm.d/www.conf
+sed -i 's/;listen.owner = nobody/listen.owner = nginx/' /etc/php83/php-fpm.d/www.conf
+sed -i 's/;listen.group = nobody/listen.group = nginx/' /etc/php83/php-fpm.d/www.conf
+sed -i 's/;listen.mode = 0660/listen.mode = 0660/' /etc/php83/php-fpm.d/www.conf
+
+# Create PHP-FPM socket directory
+mkdir -p /run/php-fpm83
+chown nginx:nginx /run/php-fpm83
 
 echo "Step 5: Installing InvoiceNinja..."
-mkdir -p ${INSTALL_DIR}
+mkdir -p /var/www
 cd /var/www
 git clone --depth 1 https://github.com/invoiceninja/invoiceninja.git invoiceninja
 cd ${INSTALL_DIR}
 
 # Install dependencies
-composer install --no-dev --no-interaction
+composer install --no-dev --no-interaction --optimize-autoloader
 
 echo "Step 6: Configuring InvoiceNinja..."
 cp .env.example .env
 
 # Generate application key
-APP_KEY=$(php artisan key:generate --show)
+APP_KEY=$(php83 artisan key:generate --show)
 
 # Configure .env file
 cat > .env <<EOF
@@ -148,9 +159,9 @@ REQUIRE_HTTPS=true
 EOF
 
 # Run migrations
-php artisan migrate --force --seed
-php artisan db:seed --force
-php artisan optimize
+php83 artisan migrate --force --seed
+php83 artisan db:seed --force
+php83 artisan optimize
 
 echo "Step 7: Setting permissions..."
 chown -R nginx:nginx ${INSTALL_DIR}
@@ -175,7 +186,7 @@ server {
     }
 
     location ~ \.php$ {
-        fastcgi_pass unix:/run/php-fpm82.sock;
+        fastcgi_pass unix:/run/php-fpm83/php-fpm83.sock;
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         include fastcgi_params;
@@ -198,41 +209,43 @@ NGINXCONF
 # Remove default nginx config
 rm -f /etc/nginx/http.d/default.conf
 
-echo "Step 9: Configuring supervisor for queue worker..."
-mkdir -p /etc/supervisor/conf.d
-cat > /etc/supervisor/conf.d/invoiceninja-worker.ini <<EOF
-[program:invoiceninja-worker]
-process_name=%(program_name)s_%(process_num)02d
-command=php ${INSTALL_DIR}/artisan queue:work --sleep=3 --tries=3 --max-time=3600
-autostart=true
-autorestart=true
-user=nginx
-numprocs=1
-redirect_stderr=true
-stdout_logfile=${INSTALL_DIR}/storage/logs/worker.log
-stopwaitsecs=3600
+echo "Step 9: Setting up cron job..."
+# Create cron job for nginx user
+mkdir -p /var/spool/cron/crontabs
+cat > /var/spool/cron/crontabs/nginx <<EOF
+* * * * * cd ${INSTALL_DIR} && php83 artisan schedule:run >> /dev/null 2>&1
 EOF
+chmod 600 /var/spool/cron/crontabs/nginx
+chown nginx:nginx /var/spool/cron/crontabs/nginx
 
-echo "Step 10: Setting up cron job..."
-cat > /etc/periodic/daily/invoiceninja-scheduler <<EOF
-#!/bin/sh
-cd ${INSTALL_DIR} && php artisan schedule:run >> /dev/null 2>&1
-EOF
-chmod +x /etc/periodic/daily/invoiceninja-scheduler
+# Create queue worker service script
+cat > /etc/init.d/invoiceninja-worker <<'WORKERSCRIPT'
+#!/sbin/openrc-run
 
-# Add to crontab for every minute execution
-echo "* * * * * cd ${INSTALL_DIR} && php artisan schedule:run >> /dev/null 2>&1" | crontab -u nginx -
+name="InvoiceNinja Queue Worker"
+command="/usr/bin/php83"
+command_args="/var/www/invoiceninja/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
+command_user="nginx:nginx"
+command_background="yes"
+pidfile="/run/invoiceninja-worker.pid"
 
-echo "Step 11: Starting services..."
+depend() {
+    need mariadb nginx php-fpm83
+}
+WORKERSCRIPT
+
+chmod +x /etc/init.d/invoiceninja-worker
+
+echo "Step 10: Starting services..."
 rc-update add nginx default
-rc-update add php-fpm82 default
-rc-update add crond default
-rc-update add supervisor default
+rc-update add php-fpm83 default
+rc-update add dcron default
+rc-update add invoiceninja-worker default
 
-/etc/init.d/php-fpm82 start
-/etc/init.d/nginx start
-/etc/init.d/crond start
-/etc/init.d/supervisor start
+/etc/init.d/php-fpm83 restart
+/etc/init.d/nginx restart
+/etc/init.d/dcron restart
+/etc/init.d/invoiceninja-worker start
 
 echo ""
 echo "==================================================================="
@@ -256,5 +269,11 @@ echo ""
 echo "To install SSL certificate, run:"
 echo "apk add certbot certbot-nginx"
 echo "certbot --nginx -d ${DOMAIN}"
+echo ""
+echo "To check service status:"
+echo "rc-service nginx status"
+echo "rc-service php-fpm83 status"
+echo "rc-service mariadb status"
+echo "rc-service invoiceninja-worker status"
 echo ""
 echo "==================================================================="
