@@ -1,5 +1,5 @@
 #!/bin/bash
-# filepath: ninja.sh
+# filepath: install_invoiceninja.sh
 
 set -e
 
@@ -13,175 +13,210 @@ INSTALL_DIR="/var/www/invoiceninja"
 MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32)
 
 echo "=========================================="
-echo "Invoice Ninja Installation Script"
+echo "Invoice Ninja v5 Installation Script"
 echo "=========================================="
 echo ""
 
 # Update system
-echo "[1/12] Updating system packages..."
-apt update && apt upgrade -y
+echo "[1/15] Updating system packages..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get upgrade -y
 
-# Install required packages
-echo "[2/12] Installing required packages..."
-apt install -y software-properties-common curl wget git unzip nginx mysql-server \
-    php8.1-fpm php8.1-cli php8.1-mysql php8.1-gd php8.1-mbstring php8.1-curl \
-    php8.1-xml php8.1-zip php8.1-bcmath php8.1-intl php8.1-gmp php8.1-imagick \
-    certbot python3-certbot-nginx
+# Install basic dependencies
+echo "[2/15] Installing basic dependencies..."
+apt-get install -y software-properties-common curl wget git unzip
 
-# Secure MySQL installation
-echo "[3/12] Configuring MySQL..."
+# Add PHP repository
+echo "[3/15] Adding PHP 8.2 repository..."
+add-apt-repository ppa:ondrej/php -y
+apt-get update
+
+# Install PHP 8.2 and extensions
+echo "[4/15] Installing PHP 8.2 and required extensions..."
+apt-get install -y php8.2 php8.2-cli php8.2-fpm php8.2-mysql php8.2-mbstring \
+    php8.2-xml php8.2-curl php8.2-zip php8.2-gd php8.2-bcmath php8.2-intl \
+    php8.2-gmp php8.2-soap
+
+# Install MySQL
+echo "[5/15] Installing MySQL..."
+apt-get install -y mysql-server
+
+# Start and enable MySQL
+systemctl start mysql
+systemctl enable mysql
+
+# Secure MySQL and create database
+echo "[6/15] Configuring MySQL..."
+# Set root password
 mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '${MYSQL_ROOT_PASSWORD}';"
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "DELETE FROM mysql.user WHERE User='';"
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "DROP DATABASE IF EXISTS test;"
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
 mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;"
 
 # Create database and user
-echo "[4/12] Creating database and user..."
+echo "[7/15] Creating database and user..."
 mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<MYSQL_SCRIPT
-CREATE DATABASE IF NOT EXISTS ${DB_DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USERNAME}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
+CREATE DATABASE ${DB_DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER '${DB_USERNAME}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
 GRANT ALL PRIVILEGES ON ${DB_DATABASE}.* TO '${DB_USERNAME}'@'localhost';
 FLUSH PRIVILEGES;
 MYSQL_SCRIPT
 
 # Install Composer
-echo "[5/12] Installing Composer..."
-cd /tmp
-curl -sS https://getcomposer.org/installer -o composer-setup.php
-php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-rm composer-setup.php
+echo "[8/15] Installing Composer..."
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+chmod +x /usr/local/bin/composer
 
-# Clone Invoice Ninja
-echo "[6/12] Downloading Invoice Ninja..."
-rm -rf ${INSTALL_DIR}
-git clone --depth 1 https://github.com/invoiceninja/invoiceninja.git ${INSTALL_DIR}
+# Download Invoice Ninja v5
+echo "[9/15] Downloading Invoice Ninja v5..."
+cd /var/www
+rm -rf invoiceninja
+curl -o invoiceninja.tar https://github.com/invoiceninja/invoiceninja/releases/latest/download/invoiceninja.tar
+tar -xvf invoiceninja.tar
+rm invoiceninja.tar
+
+# Set up Invoice Ninja
+echo "[10/15] Setting up Invoice Ninja..."
 cd ${INSTALL_DIR}
 
-# Install dependencies
-echo "[7/12] Installing Invoice Ninja dependencies..."
-composer install --no-dev --optimize-autoloader
-
-# Configure environment
-echo "[8/12] Configuring Invoice Ninja..."
+# Copy environment file
 cp .env.example .env
 
+# Update .env file with configuration
+sed -i "s|APP_URL=.*|APP_URL=https://${DOMAIN}|g" .env
+sed -i "s|APP_DEBUG=.*|APP_DEBUG=false|g" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_DATABASE}|g" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USERNAME}|g" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD}|g" .env
+sed -i "s|PDF_GENERATOR=.*|PDF_GENERATOR=${PDF_GENERATOR}|g" .env
+sed -i "s|REQUIRE_HTTPS=.*|REQUIRE_HTTPS=true|g" .env
+
 # Generate application key
-APP_KEY=$(php artisan key:generate --show)
-
-# Update .env file
-cat > .env <<ENV_FILE
-APP_NAME="Invoice Ninja"
-APP_ENV=production
-APP_KEY=${APP_KEY}
-APP_DEBUG=false
-APP_URL=https://${DOMAIN}
-
-LOG_CHANNEL=stack
-
-DB_CONNECTION=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_DATABASE=${DB_DATABASE}
-DB_USERNAME=${DB_USERNAME}
-DB_PASSWORD=${DB_PASSWORD}
-
-BROADCAST_DRIVER=log
-CACHE_DRIVER=file
-QUEUE_CONNECTION=database
-SESSION_DRIVER=file
-SESSION_LIFETIME=120
-
-REDIS_HOST=127.0.0.1
-REDIS_PASSWORD=null
-REDIS_PORT=6379
-
-MAIL_MAILER=log
-MAIL_HOST=localhost
-MAIL_PORT=1025
-MAIL_USERNAME=null
-MAIL_PASSWORD=null
-MAIL_ENCRYPTION=null
-MAIL_FROM_ADDRESS=noreply@${DOMAIN}
-MAIL_FROM_NAME="\${APP_NAME}"
-
-PDF_GENERATOR=${PDF_GENERATOR}
-
-REQUIRE_HTTPS=true
-ENV_FILE
+php artisan key:generate --no-interaction
 
 # Set permissions
-echo "[9/12] Setting permissions..."
+echo "[11/15] Setting correct permissions..."
 chown -R www-data:www-data ${INSTALL_DIR}
 chmod -R 755 ${INSTALL_DIR}
 chmod -R 775 ${INSTALL_DIR}/storage
 chmod -R 775 ${INSTALL_DIR}/bootstrap/cache
+chmod -R 775 ${INSTALL_DIR}/public
 
-# Run migrations
-echo "[10/12] Running database migrations..."
-cd ${INSTALL_DIR}
-sudo -u www-data php artisan migrate --force --seed
+# Run database migrations
+echo "[12/15] Running database migrations..."
+php artisan migrate --force
 
-# Configure Nginx
-echo "[11/12] Configuring Nginx..."
-cat > /etc/nginx/sites-available/invoiceninja <<NGINX_CONF
+# Install Nginx
+echo "[13/15] Installing and configuring Nginx..."
+apt-get install -y nginx
+
+# Create Nginx configuration
+cat > /etc/nginx/sites-available/invoiceninja.conf <<'NGINX_CONFIG'
 server {
     listen 80;
-    listen [::]:80;
-    server_name ${DOMAIN};
-    root ${INSTALL_DIR}/public;
+    server_name DOMAIN_PLACEHOLDER;
+    root /var/www/invoiceninja/public;
 
     index index.php index.html index.htm;
+    client_max_body_size 20M;
 
-    charset utf-8;
+    gzip on;
+    gzip_types      application/javascript application/x-javascript text/javascript text/plain application/xml application/json;
+    gzip_proxied    no-cache no-store private expired auth;
+    gzip_min_length 1000;
 
     location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
+        try_files $uri $uri/ /index.php?$query_string;
     }
-
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-
-    error_page 404 /index.php;
 
     location ~ \.php$ {
-        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
         fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_buffers 16 16k;
-        fastcgi_buffer_size 32k;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
     }
 
-    location ~ /\.(?!well-known).* {
+    location ~ /\.ht {
         deny all;
     }
-
-    client_max_body_size 100M;
 }
-NGINX_CONF
+NGINX_CONFIG
+
+# Replace domain placeholder
+sed -i "s|DOMAIN_PLACEHOLDER|${DOMAIN}|g" /etc/nginx/sites-available/invoiceninja.conf
 
 # Enable site
-ln -sf /etc/nginx/sites-available/invoiceninja /etc/nginx/sites-enabled/
+ln -sf /etc/nginx/sites-available/invoiceninja.conf /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 
-# Test and restart Nginx
+# Test Nginx configuration
 nginx -t
+
+# Restart services
+systemctl restart php8.2-fpm
 systemctl restart nginx
+systemctl enable nginx
+systemctl enable php8.2-fpm
 
-# Setup SSL with Let's Encrypt
-echo "[12/12] Setting up SSL certificate..."
-certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos --register-unsafely-without-email --redirect
+# Install SSL certificate
+echo "[14/15] Installing SSL certificate with Let's Encrypt..."
+apt-get install -y certbot python3-certbot-nginx
 
-# Final optimization
+# Attempt to get SSL certificate
+certbot --nginx -d ${DOMAIN} --non-interactive --agree-tos -m admin@${DOMAIN} --redirect || {
+    echo "WARNING: SSL certificate installation failed."
+    echo "Make sure your domain ${DOMAIN} points to this server's IP address."
+    echo "You can run the following command manually later:"
+    echo "sudo certbot --nginx -d ${DOMAIN}"
+}
+
+# Set up cron job for Invoice Ninja scheduler
+echo "[15/15] Setting up cron job..."
+(crontab -l 2>/dev/null | grep -v "invoiceninja"; echo "* * * * * cd /var/www/invoiceninja && php artisan schedule:run >> /dev/null 2>&1") | crontab -
+
+# Optimize application
 cd ${INSTALL_DIR}
-sudo -u www-data php artisan optimize
-sudo -u www-data php artisan config:cache
-sudo -u www-data php artisan route:cache
-sudo -u www-data php artisan view:cache
+php artisan optimize
+php artisan view:cache
+php artisan route:cache
 
-# Setup cron for scheduled tasks
-(crontab -l 2>/dev/null; echo "* * * * * cd ${INSTALL_DIR} && php artisan schedule:run >> /dev/null 2>&1") | crontab -
+# Save credentials
+cat > /root/invoiceninja_install.txt <<CREDS
+========================================
+Invoice Ninja v5 Installation Details
+========================================
+Installation Date: $(date)
+
+URL: https://${DOMAIN}
+
+MySQL Root Password: ${MYSQL_ROOT_PASSWORD}
+
+Database Information:
+  Database Name: ${DB_DATABASE}
+  Database User: ${DB_USERNAME}
+  Database Pass: ${DB_PASSWORD}
+
+Installation Path: ${INSTALL_DIR}
+
+PHP Version: 8.2
+PDF Generator: ${PDF_GENERATOR}
+
+========================================
+Next Steps:
+1. Visit https://${DOMAIN}/setup to complete installation
+2. Create your admin account
+3. Configure email settings in Settings > Email Settings
+
+If SSL failed, run:
+  sudo certbot --nginx -d ${DOMAIN}
+========================================
+CREDS
+
+chmod 600 /root/invoiceninja_install.txt
 
 echo ""
 echo "=========================================="
@@ -189,15 +224,14 @@ echo "Installation Complete!"
 echo "=========================================="
 echo ""
 echo "Invoice Ninja URL: https://${DOMAIN}"
+echo ""
+echo "Credentials saved to: /root/invoiceninja_install.txt"
+echo ""
 echo "MySQL Root Password: ${MYSQL_ROOT_PASSWORD}"
 echo ""
-echo "Database Details:"
-echo "  Database: ${DB_DATABASE}"
-echo "  Username: ${DB_USERNAME}"
-echo "  Password: ${DB_PASSWORD}"
+echo "NEXT STEPS:"
+echo "1. Visit https://${DOMAIN}/setup"
+echo "2. Complete the setup wizard"
+echo "3. Create your admin account"
 echo ""
-echo "IMPORTANT: Save the MySQL root password above!"
-echo "Please visit https://${DOMAIN} to complete the setup."
-echo ""
-echo "Default admin credentials will be created during first setup."
 echo "=========================================="
