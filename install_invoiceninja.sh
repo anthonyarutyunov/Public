@@ -14,106 +14,144 @@ PDF_GENERATOR="hosted_ninja"
 INSTALL_DIR="/var/www/invoiceninja"
 MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32)
 
-echo "Step 1: Updating system and installing dependencies..."
+echo "Step 1: Updating repositories..."
+cat > /etc/apk/repositories <<EOF
+https://dl-cdn.alpinelinux.org/alpine/v3.22/main
+https://dl-cdn.alpinelinux.org/alpine/v3.22/community
+EOF
+
 apk update
 apk upgrade
+
+echo "Step 2: Installing base packages..."
 apk add --no-cache \
     nginx \
-    php83 \
-    php83-fpm \
-    php83-opcache \
-    php83-mysqli \
-    php83-pdo \
-    php83-pdo_mysql \
-    php83-mbstring \
-    php83-xml \
-    php83-simplexml \
-    php83-zip \
-    php83-gd \
-    php83-curl \
-    php83-tokenizer \
-    php83-bcmath \
-    php83-soap \
-    php83-gmp \
-    php83-intl \
-    php83-fileinfo \
-    php83-dom \
-    php83-session \
-    php83-ctype \
-    php83-iconv \
-    php83-phar \
-    php83-openssl \
     mariadb \
     mariadb-client \
-    composer \
     git \
     curl \
     openssl \
     dcron \
-    libcap
+    libcap \
+    wget
 
-echo "Step 2: Starting and configuring MariaDB..."
+echo "Step 3: Detecting and installing available PHP version..."
+# Try to find available PHP versions
+if apk search php83 | grep -q "php83$"; then
+    PHP_VER="php83"
+elif apk search php82 | grep -q "php82$"; then
+    PHP_VER="php82"
+elif apk search php81 | grep -q "php81$"; then
+    PHP_VER="php81"
+else
+    echo "ERROR: No compatible PHP version found!"
+    exit 1
+fi
+
+echo "Installing PHP ${PHP_VER}..."
+
+apk add --no-cache \
+    ${PHP_VER} \
+    ${PHP_VER}-fpm \
+    ${PHP_VER}-opcache \
+    ${PHP_VER}-mysqli \
+    ${PHP_VER}-pdo \
+    ${PHP_VER}-pdo_mysql \
+    ${PHP_VER}-mbstring \
+    ${PHP_VER}-xml \
+    ${PHP_VER}-simplexml \
+    ${PHP_VER}-zip \
+    ${PHP_VER}-gd \
+    ${PHP_VER}-curl \
+    ${PHP_VER}-tokenizer \
+    ${PHP_VER}-bcmath \
+    ${PHP_VER}-soap \
+    ${PHP_VER}-gmp \
+    ${PHP_VER}-intl \
+    ${PHP_VER}-fileinfo \
+    ${PHP_VER}-dom \
+    ${PHP_VER}-session \
+    ${PHP_VER}-ctype \
+    ${PHP_VER}-iconv \
+    ${PHP_VER}-phar \
+    ${PHP_VER}-openssl
+
+# Create PHP symlink
+ln -sf /usr/bin/${PHP_VER} /usr/bin/php
+
+echo "Step 4: Installing Composer..."
+cd /tmp
+wget https://getcomposer.org/installer -O composer-setup.php
+php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+rm composer-setup.php
+
+echo "Step 5: Starting and configuring MariaDB..."
+mkdir -p /run/mysqld
+chown mysql:mysql /run/mysqld
 rc-update add mariadb default
-/etc/init.d/mariadb setup
+
+if [ ! -d "/var/lib/mysql/mysql" ]; then
+    mysql_install_db --user=mysql --datadir=/var/lib/mysql
+fi
+
 /etc/init.d/mariadb start
 
 # Wait for MariaDB to be ready
+echo "Waiting for MariaDB to start..."
 sleep 10
 
 # Secure MariaDB installation
-mariadb -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MYSQL_ROOT_PASSWORD}';" 2>/dev/null || \
-mysql_secure_installation <<EOSQL
-${MYSQL_ROOT_PASSWORD}
-${MYSQL_ROOT_PASSWORD}
-y
-y
-y
-y
-EOSQL
+mysqladmin -u root password "${MYSQL_ROOT_PASSWORD}" 2>/dev/null || true
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');" 2>/dev/null || true
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "DROP DATABASE IF EXISTS test;" 2>/dev/null || true
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" -e "FLUSH PRIVILEGES;" 2>/dev/null || true
 
-sleep 2
-
-echo "Step 3: Creating database and user..."
-mariadb -uroot -p"${MYSQL_ROOT_PASSWORD}" <<EOF
+echo "Step 6: Creating database and user..."
+mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" <<EOF
 CREATE DATABASE IF NOT EXISTS ${DB_DATABASE} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USERNAME}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
 GRANT ALL PRIVILEGES ON ${DB_DATABASE}.* TO '${DB_USERNAME}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-echo "Step 4: Configuring PHP-FPM..."
-sed -i 's/memory_limit = .*/memory_limit = 512M/' /etc/php83/php.ini
-sed -i 's/upload_max_filesize = .*/upload_max_filesize = 100M/' /etc/php83/php.ini
-sed -i 's/post_max_size = .*/post_max_size = 100M/' /etc/php83/php.ini
-sed -i 's/max_execution_time = .*/max_execution_time = 300/' /etc/php83/php.ini
-sed -i 's/;date.timezone =.*/date.timezone = UTC/' /etc/php83/php.ini
+echo "Step 7: Configuring PHP..."
+PHP_INI="/etc/${PHP_VER}/php.ini"
+sed -i 's/memory_limit = .*/memory_limit = 512M/' ${PHP_INI}
+sed -i 's/upload_max_filesize = .*/upload_max_filesize = 100M/' ${PHP_INI}
+sed -i 's/post_max_size = .*/post_max_size = 100M/' ${PHP_INI}
+sed -i 's/max_execution_time = .*/max_execution_time = 300/' ${PHP_INI}
+sed -i 's/;date.timezone =.*/date.timezone = UTC/' ${PHP_INI}
+sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' ${PHP_INI}
 
-# Configure PHP-FPM pool
-sed -i 's/user = nobody/user = nginx/' /etc/php83/php-fpm.d/www.conf
-sed -i 's/group = nobody/group = nginx/' /etc/php83/php-fpm.d/www.conf
-sed -i 's/listen = 127.0.0.1:9000/listen = \/run\/php-fpm83\/php-fpm83.sock/' /etc/php83/php-fpm.d/www.conf
-sed -i 's/;listen.owner = nobody/listen.owner = nginx/' /etc/php83/php-fpm.d/www.conf
-sed -i 's/;listen.group = nobody/listen.group = nginx/' /etc/php83/php-fpm.d/www.conf
-sed -i 's/;listen.mode = 0660/listen.mode = 0660/' /etc/php83/php-fpm.d/www.conf
+echo "Step 8: Configuring PHP-FPM..."
+FPM_CONF="/etc/${PHP_VER}/php-fpm.d/www.conf"
+sed -i 's/user = nobody/user = nginx/' ${FPM_CONF}
+sed -i 's/group = nobody/group = nginx/' ${FPM_CONF}
+sed -i 's/listen = 127.0.0.1:9000/listen = \/run\/php-fpm.sock/' ${FPM_CONF}
+sed -i 's/;listen.owner = nobody/listen.owner = nginx/' ${FPM_CONF}
+sed -i 's/;listen.group = nobody/listen.group = nginx/' ${FPM_CONF}
+sed -i 's/;listen.mode = 0660/listen.mode = 0660/' ${FPM_CONF}
 
-# Create PHP-FPM socket directory
-mkdir -p /run/php-fpm83
-chown nginx:nginx /run/php-fpm83
-
-echo "Step 5: Installing InvoiceNinja..."
+echo "Step 9: Installing InvoiceNinja..."
 mkdir -p /var/www
 cd /var/www
-git clone --depth 1 https://github.com/invoiceninja/invoiceninja.git invoiceninja
+
+if [ -d "invoiceninja" ]; then
+    rm -rf invoiceninja
+fi
+
+git clone https://github.com/invoiceninja/invoiceninja.git
 cd ${INSTALL_DIR}
 
-# Install dependencies
-composer install --no-dev --no-interaction --optimize-autoloader
+# Install dependencies with composer
+COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --no-interaction --optimize-autoloader
 
-echo "Step 6: Configuring InvoiceNinja..."
+echo "Step 10: Configuring InvoiceNinja..."
 cp .env.example .env
 
 # Generate application key
-APP_KEY=$(php83 artisan key:generate --show)
+APP_KEY=$(php artisan key:generate --show)
 
 # Configure .env file
 cat > .env <<EOF
@@ -159,42 +197,51 @@ REQUIRE_HTTPS=true
 EOF
 
 # Run migrations
-php83 artisan migrate --force --seed
-php83 artisan db:seed --force
-php83 artisan optimize
+php artisan migrate --force
+php artisan db:seed --force
+php artisan optimize
 
-echo "Step 7: Setting permissions..."
+echo "Step 11: Setting permissions..."
 chown -R nginx:nginx ${INSTALL_DIR}
 chmod -R 755 ${INSTALL_DIR}
 chmod -R 775 ${INSTALL_DIR}/storage
 chmod -R 775 ${INSTALL_DIR}/bootstrap/cache
 chmod -R 775 ${INSTALL_DIR}/public
 
-echo "Step 8: Configuring Nginx..."
+echo "Step 12: Configuring Nginx..."
 cat > /etc/nginx/http.d/${DOMAIN}.conf <<'NGINXCONF'
 server {
     listen 80;
     server_name invoicing.insmallusa.com;
     root /var/www/invoiceninja/public;
 
-    index index.php index.html index.htm;
+    index index.php index.html;
 
     client_max_body_size 100M;
+    
+    charset utf-8;
 
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
     location ~ \.php$ {
-        fastcgi_pass unix:/run/php-fpm83/php-fpm83.sock;
+        include fastcgi_params;
+        fastcgi_pass unix:/run/php-fpm.sock;
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        include fastcgi_params;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
         fastcgi_buffer_size 16k;
         fastcgi_buffers 4 16k;
+        fastcgi_busy_buffers_size 16k;
     }
 
-    location ~ /\.ht {
+    location ~ /\.(?!well-known).* {
         deny all;
     }
 
@@ -206,43 +253,47 @@ server {
 }
 NGINXCONF
 
-# Remove default nginx config
+# Test nginx configuration
+nginx -t
+
+# Remove default nginx config if exists
 rm -f /etc/nginx/http.d/default.conf
 
-echo "Step 9: Setting up cron job..."
-# Create cron job for nginx user
+echo "Step 13: Setting up cron job..."
 mkdir -p /var/spool/cron/crontabs
 cat > /var/spool/cron/crontabs/nginx <<EOF
-* * * * * cd ${INSTALL_DIR} && php83 artisan schedule:run >> /dev/null 2>&1
+* * * * * cd ${INSTALL_DIR} && php artisan schedule:run >> /dev/null 2>&1
 EOF
 chmod 600 /var/spool/cron/crontabs/nginx
 chown nginx:nginx /var/spool/cron/crontabs/nginx
 
-# Create queue worker service script
-cat > /etc/init.d/invoiceninja-worker <<'WORKERSCRIPT'
+echo "Step 14: Creating queue worker service..."
+cat > /etc/init.d/invoiceninja-worker <<WORKERSCRIPT
 #!/sbin/openrc-run
 
 name="InvoiceNinja Queue Worker"
-command="/usr/bin/php83"
-command_args="/var/www/invoiceninja/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
+command="/usr/bin/php"
+command_args="${INSTALL_DIR}/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
 command_user="nginx:nginx"
 command_background="yes"
 pidfile="/run/invoiceninja-worker.pid"
+output_log="/var/log/invoiceninja-worker.log"
+error_log="/var/log/invoiceninja-worker-error.log"
 
 depend() {
-    need mariadb nginx php-fpm83
+    need mariadb nginx ${PHP_VER}-fpm
 }
 WORKERSCRIPT
 
 chmod +x /etc/init.d/invoiceninja-worker
 
-echo "Step 10: Starting services..."
+echo "Step 15: Starting services..."
 rc-update add nginx default
-rc-update add php-fpm83 default
+rc-update add ${PHP_VER}-fpm default
 rc-update add dcron default
 rc-update add invoiceninja-worker default
 
-/etc/init.d/php-fpm83 restart
+/etc/init.d/${PHP_VER}-fpm restart
 /etc/init.d/nginx restart
 /etc/init.d/dcron restart
 /etc/init.d/invoiceninja-worker start
@@ -252,7 +303,10 @@ echo "==================================================================="
 echo "InvoiceNinja Installation Complete!"
 echo "==================================================================="
 echo ""
+echo "PHP Version Installed: ${PHP_VER}"
+echo ""
 echo "Access your installation at: http://${DOMAIN}"
+echo "Or via IP: http://$(hostname -i)"
 echo ""
 echo "IMPORTANT - Save these credentials:"
 echo "-----------------------------------"
@@ -262,18 +316,36 @@ echo "Database User: ${DB_USERNAME}"
 echo "Database Password: ${DB_PASSWORD}"
 echo ""
 echo "Next steps:"
-echo "1. Configure SSL/TLS certificate (recommended: certbot with Let's Encrypt)"
-echo "2. Point your domain ${DOMAIN} to this server's IP address"
-echo "3. Complete the InvoiceNinja setup wizard in your browser"
+echo "1. Point your domain ${DOMAIN} to this server's IP address"
+echo "2. Complete the InvoiceNinja setup wizard in your browser"
+echo "3. Install SSL certificate (recommended)"
 echo ""
-echo "To install SSL certificate, run:"
+echo "To install SSL certificate:"
 echo "apk add certbot certbot-nginx"
 echo "certbot --nginx -d ${DOMAIN}"
 echo ""
-echo "To check service status:"
-echo "rc-service nginx status"
-echo "rc-service php-fpm83 status"
-echo "rc-service mariadb status"
-echo "rc-service invoiceninja-worker status"
+echo "Service commands:"
+echo "rc-service nginx status|restart|stop"
+echo "rc-service ${PHP_VER}-fpm status|restart|stop"
+echo "rc-service mariadb status|restart|stop"
+echo "rc-service invoiceninja-worker status|restart|stop"
 echo ""
 echo "==================================================================="
+
+# Save credentials to file
+cat > /root/invoiceninja-credentials.txt <<EOF
+InvoiceNinja Installation Credentials
+======================================
+Date: $(date)
+Domain: ${DOMAIN}
+Installation Directory: ${INSTALL_DIR}
+
+MySQL Root Password: ${MYSQL_ROOT_PASSWORD}
+Database Name: ${DB_DATABASE}
+Database User: ${DB_USERNAME}
+Database Password: ${DB_PASSWORD}
+
+PHP Version: ${PHP_VER}
+EOF
+
+echo "Credentials saved to: /root/invoiceninja-credentials.txt"
